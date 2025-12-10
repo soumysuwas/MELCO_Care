@@ -124,6 +124,11 @@ def init_session_state():
         st.session_state.pending_symptoms = None
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
+    # Pharmacy state
+    if "pharmacy_results" not in st.session_state:
+        st.session_state.pharmacy_results = None
+    if "prescription_data" not in st.session_state:
+        st.session_state.prescription_data = None
 
 
 # ============== API FUNCTIONS ==============
@@ -209,6 +214,52 @@ def api_get_system_status():
         return response.json()
     except:
         return {"database_status": "unknown", "ollama_status": "unknown"}
+
+
+def api_validate_prescription(user_id: int, image_file):
+    """Validate prescription via OCR"""
+    try:
+        files = {"image": image_file}
+        data = {"user_id": str(user_id)}
+        response = requests.post(
+            f"{API_BASE_URL}/pharmacy/validate-prescription",
+            files=files,
+            data=data,
+            timeout=120
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"Error: {str(e)}"}
+
+
+def api_search_medicines(user_id: int, medicines: list, max_distance: float = 10.0):
+    """Search for medicines at nearby pharmacies"""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/pharmacy/search",
+            json={
+                "user_id": user_id,
+                "medicines": medicines,
+                "max_distance_km": max_distance,
+                "city": "Hyderabad"
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "pharmacies": [], "error": str(e)}
+
+
+def api_list_pharmacies():
+    """Get list of pharmacies"""
+    try:
+        response = requests.get(f"{API_BASE_URL}/pharmacy/list", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except:
+        return {"pharmacies": []}
 
 
 # ============== UI COMPONENTS ==============
@@ -342,9 +393,80 @@ def render_chat_interface():
             else:
                 st.error(f"Failed to book: {result.get('message')}")
     
+    # Pharmacy results if available
+    if st.session_state.pharmacy_results:
+        render_pharmacy_results(st.session_state.pharmacy_results)
+    
     # Chat input
     st.markdown("---")
     
+    # Prescription upload section
+    with st.expander("📋 Upload Prescription", expanded=False):
+        prescription_file = st.file_uploader(
+            "Upload your prescription image",
+            type=["jpg", "jpeg", "png"],
+            key="prescription_upload",
+            help="Upload a prescription to find medicines at nearby pharmacies"
+        )
+        
+        if prescription_file:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.image(prescription_file, caption="Uploaded Prescription", width=200)
+            with col2:
+                if st.button("🔍 Validate & Find Medicines", type="primary"):
+                    with st.spinner("Analyzing prescription..."):
+                        result = api_validate_prescription(
+                            st.session_state.user_id,
+                            prescription_file
+                        )
+                    
+                    if result.get("valid"):
+                        st.success("✅ Prescription validated!")
+                        
+                        # Show extracted data
+                        extracted = result.get("extracted_data", {})
+                        if extracted:
+                            st.markdown("**Extracted Information:**")
+                            if extracted.get("doctor_name"):
+                                st.write(f"👨‍⚕️ Doctor: {extracted['doctor_name']}")
+                            if extracted.get("reg_number"):
+                                verified = "✅" if result.get("doctor_verified") else "❓"
+                                st.write(f"🔖 Reg: {extracted['reg_number']} {verified}")
+                        
+                        # Search for medicines
+                        medicines = result.get("medicines", [])
+                        if medicines:
+                            st.markdown(f"**Medicines Found:** {', '.join(medicines)}")
+                            with st.spinner("Searching pharmacies..."):
+                                pharmacy_result = api_search_medicines(
+                                    st.session_state.user_id,
+                                    medicines
+                                )
+                            st.session_state.pharmacy_results = pharmacy_result
+                            st.rerun()
+                    else:
+                        st.error(f"❌ {result.get('error', 'Could not validate prescription')}")
+    
+    # Medicine search input
+    with st.expander("💊 Search Medicine", expanded=False):
+        medicine_input = st.text_input(
+            "Enter medicine name(s)",
+            placeholder="e.g., paracetamol, cetirizine",
+            key="medicine_search"
+        )
+        if st.button("🔍 Search", key="search_med_btn"):
+            if medicine_input:
+                medicines = [m.strip() for m in medicine_input.split(",")]
+                with st.spinner("Searching pharmacies..."):
+                    result = api_search_medicines(
+                        st.session_state.user_id,
+                        medicines
+                    )
+                st.session_state.pharmacy_results = result
+                st.rerun()
+    
+    # Regular chat input
     col1, col2 = st.columns([4, 1])
     
     with col1:
@@ -391,6 +513,61 @@ def render_chat_interface():
             st.session_state.current_doctor_options = result["doctor_options"]
             st.session_state.pending_symptoms = user_input
         
+        st.rerun()
+
+
+def render_pharmacy_results(results: dict):
+    """Render pharmacy search results"""
+    st.markdown("### 💊 Pharmacy Results")
+    
+    pharmacies = results.get("pharmacies", [])
+    
+    if not pharmacies:
+        st.warning("No pharmacies found with the requested medicines nearby.")
+        if st.button("Clear Results"):
+            st.session_state.pharmacy_results = None
+            st.rerun()
+        return
+    
+    # Summary
+    all_found = results.get("all_found", False)
+    missing = results.get("missing_medicines", [])
+    
+    if all_found:
+        st.success("✅ All medicines are available!")
+    elif missing:
+        st.warning(f"⚠️ Some medicines may not be available: {', '.join(missing)}")
+    
+    # Display pharmacies
+    for i, pharmacy in enumerate(pharmacies[:5]):
+        with st.expander(
+            f"🏪 {pharmacy['name']} ({pharmacy['distance_km']} km) - "
+            f"{pharmacy['available_count']}/{len(pharmacy['medicines'])} medicines",
+            expanded=(i == 0)
+        ):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.markdown(f"**📍 {pharmacy['address']}**")
+                st.caption(f"⏰ {pharmacy['operating_hours']}")
+                if pharmacy.get('phone'):
+                    st.caption(f"📞 {pharmacy['phone']}")
+                if pharmacy.get('is_24hr'):
+                    st.caption("🌙 Open 24 Hours")
+            
+            with col2:
+                st.metric("Distance", f"{pharmacy['distance_km']} km")
+            
+            # Medicine availability
+            st.markdown("**Medicines:**")
+            for med in pharmacy['medicines']:
+                if med['in_stock']:
+                    st.markdown(f"✅ **{med['name']}** - ₹{med['price']} (Stock: {med['stock']})")
+                else:
+                    st.markdown(f"❌ ~~{med['name']}~~ - Out of Stock")
+    
+    if st.button("🔄 Clear Results", key="clear_pharmacy"):
+        st.session_state.pharmacy_results = None
         st.rerun()
 
 
