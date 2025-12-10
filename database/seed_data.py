@@ -313,8 +313,16 @@ def seed_doctors(session: Session, users: list[User], departments: list[Departme
     assignable_depts = [d for d in departments 
                        if d.name not in [DepartmentType.EMERGENCY, DepartmentType.RADIOLOGY]]
     
+    # PRIORITIZE: First assign doctors to General Medicine departments
+    gm_depts = [d for d in assignable_depts if d.name == DepartmentType.GENERAL_MEDICINE]
+    other_depts = [d for d in assignable_depts if d.name != DepartmentType.GENERAL_MEDICINE]
+    
     for i, user in enumerate(doctor_users):
-        dept = random.choice(assignable_depts)
+        # First 4 doctors go to General Medicine for reliable testing
+        if i < 4 and gm_depts:
+            dept = random.choice(gm_depts)
+        else:
+            dept = random.choice(assignable_depts)
         
         # Create queue with some doctors overloaded (stress test)
         if random.random() < 0.3:  # 30% are overloaded
