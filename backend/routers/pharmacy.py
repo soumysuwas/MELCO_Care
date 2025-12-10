@@ -263,3 +263,282 @@ async def list_pharmacies(city: str = "Hyderabad"):
             ],
             "total": len(pharmacies)
         }
+
+
+# ============== RESERVATION ENDPOINTS ==============
+
+class ReserveMedicineRequest(BaseModel):
+    """Request to reserve medicines"""
+    user_id: int
+    pharmacy_id: int
+    medicines: List[dict]  # [{"name": "Dolo 650", "quantity": 2}]
+
+
+class ReservationResponse(BaseModel):
+    """Reservation confirmation"""
+    success: bool
+    reservation_id: Optional[int]
+    pickup_code: Optional[str]
+    expires_at: Optional[str]
+    total_amount: Optional[float]
+    pharmacy_name: Optional[str]
+    message: str
+
+
+@router.post("/reserve", response_model=ReservationResponse)
+async def reserve_medicines(request: ReserveMedicineRequest):
+    """
+    Reserve medicines at a pharmacy for pickup
+    
+    - Reduces inventory by requested quantity
+    - Generates pickup code
+    - Sets 1-hour expiry time
+    """
+    import json
+    import random
+    from datetime import timedelta
+    from sqlmodel import Session, select
+    from database.connection import get_engine
+    from database.models import Pharmacy, Inventory, MedicineReservation, ReservationStatus
+    
+    engine = get_engine()
+    with Session(engine) as session:
+        # First, expire old reservations
+        _expire_old_reservations(session)
+        
+        # Get pharmacy
+        pharmacy = session.get(Pharmacy, request.pharmacy_id)
+        if not pharmacy:
+            return ReservationResponse(
+                success=False, message="Pharmacy not found",
+                reservation_id=None, pickup_code=None, expires_at=None,
+                total_amount=None, pharmacy_name=None
+            )
+        
+        # Check stock and calculate total
+        medicines_with_prices = []
+        total_amount = 0.0
+        
+        for med in request.medicines:
+            med_name = med.get("name", "")
+            quantity = med.get("quantity", 1)
+            
+            # Find in inventory
+            inventory_item = session.exec(
+                select(Inventory).where(
+                    Inventory.pharmacy_id == request.pharmacy_id,
+                    Inventory.medicine_name == med_name
+                )
+            ).first()
+            
+            if not inventory_item:
+                return ReservationResponse(
+                    success=False, message=f"Medicine '{med_name}' not found at this pharmacy",
+                    reservation_id=None, pickup_code=None, expires_at=None,
+                    total_amount=None, pharmacy_name=pharmacy.name
+                )
+            
+            if inventory_item.stock_count < quantity:
+                return ReservationResponse(
+                    success=False, 
+                    message=f"Insufficient stock for '{med_name}'. Available: {inventory_item.stock_count}",
+                    reservation_id=None, pickup_code=None, expires_at=None,
+                    total_amount=None, pharmacy_name=pharmacy.name
+                )
+            
+            # Reduce inventory
+            inventory_item.stock_count -= quantity
+            session.add(inventory_item)
+            
+            med_total = inventory_item.price_inr * quantity
+            total_amount += med_total
+            medicines_with_prices.append({
+                "name": med_name,
+                "quantity": quantity,
+                "price": inventory_item.price_inr,
+                "total": med_total
+            })
+        
+        # Create reservation
+        pickup_code = str(random.randint(100000, 999999))
+        expires_at = datetime.utcnow() + timedelta(hours=1)
+        
+        reservation = MedicineReservation(
+            user_id=request.user_id,
+            pharmacy_id=request.pharmacy_id,
+            medicines_json=json.dumps(medicines_with_prices),
+            total_amount=total_amount,
+            status=ReservationStatus.PENDING,
+            expires_at=expires_at,
+            pickup_code=pickup_code
+        )
+        session.add(reservation)
+        session.commit()
+        session.refresh(reservation)
+        
+        return ReservationResponse(
+            success=True,
+            reservation_id=reservation.reservation_id,
+            pickup_code=pickup_code,
+            expires_at=expires_at.isoformat(),
+            total_amount=round(total_amount, 2),
+            pharmacy_name=pharmacy.name,
+            message=f"Reserved! Pickup within 1 hour. Show code: {pickup_code}"
+        )
+
+
+@router.post("/pickup/{reservation_id}")
+async def confirm_pickup(reservation_id: int, pickup_code: str):
+    """Confirm medicine pickup with verification code"""
+    from sqlmodel import Session
+    from database.connection import get_engine
+    from database.models import MedicineReservation, ReservationStatus
+    
+    engine = get_engine()
+    with Session(engine) as session:
+        reservation = session.get(MedicineReservation, reservation_id)
+        
+        if not reservation:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        
+        if reservation.status != ReservationStatus.PENDING:
+            raise HTTPException(status_code=400, detail=f"Reservation is {reservation.status.value}")
+        
+        if reservation.pickup_code != pickup_code:
+            raise HTTPException(status_code=400, detail="Invalid pickup code")
+        
+        if datetime.utcnow() > reservation.expires_at:
+            # Already expired, revert and mark
+            _revert_reservation_inventory(session, reservation)
+            reservation.status = ReservationStatus.EXPIRED
+            session.add(reservation)
+            session.commit()
+            raise HTTPException(status_code=400, detail="Reservation expired")
+        
+        # Mark as picked up
+        reservation.status = ReservationStatus.PICKED_UP
+        reservation.updated_at = datetime.utcnow()
+        session.add(reservation)
+        session.commit()
+        
+        return {
+            "success": True,
+            "message": "Medicines picked up successfully!",
+            "reservation_id": reservation_id,
+            "total_paid": reservation.total_amount
+        }
+
+
+@router.post("/cancel/{reservation_id}")
+async def cancel_reservation(reservation_id: int, user_id: int):
+    """Cancel a reservation and restore inventory"""
+    from sqlmodel import Session
+    from database.connection import get_engine
+    from database.models import MedicineReservation, ReservationStatus
+    
+    engine = get_engine()
+    with Session(engine) as session:
+        reservation = session.get(MedicineReservation, reservation_id)
+        
+        if not reservation:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        
+        if reservation.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not your reservation")
+        
+        if reservation.status != ReservationStatus.PENDING:
+            raise HTTPException(status_code=400, detail=f"Cannot cancel - status is {reservation.status.value}")
+        
+        # Revert inventory
+        _revert_reservation_inventory(session, reservation)
+        
+        # Mark as cancelled
+        reservation.status = ReservationStatus.CANCELLED
+        reservation.updated_at = datetime.utcnow()
+        session.add(reservation)
+        session.commit()
+        
+        return {
+            "success": True,
+            "message": "Reservation cancelled. Inventory restored.",
+            "reservation_id": reservation_id
+        }
+
+
+@router.get("/reservations/{user_id}")
+async def get_user_reservations(user_id: int):
+    """Get all reservations for a user"""
+    import json
+    from sqlmodel import Session, select
+    from database.connection import get_engine
+    from database.models import MedicineReservation, Pharmacy
+    
+    engine = get_engine()
+    with Session(engine) as session:
+        # Expire old ones first
+        _expire_old_reservations(session)
+        
+        reservations = session.exec(
+            select(MedicineReservation).where(
+                MedicineReservation.user_id == user_id
+            ).order_by(MedicineReservation.created_at.desc())
+        ).all()
+        
+        result = []
+        for r in reservations:
+            pharmacy = session.get(Pharmacy, r.pharmacy_id)
+            result.append({
+                "reservation_id": r.reservation_id,
+                "pharmacy_name": pharmacy.name if pharmacy else "Unknown",
+                "medicines": json.loads(r.medicines_json),
+                "total_amount": r.total_amount,
+                "status": r.status.value,
+                "pickup_code": r.pickup_code if r.status.value == "pending" else None,
+                "expires_at": r.expires_at.isoformat(),
+                "created_at": r.created_at.isoformat()
+            })
+        
+        return {"user_id": user_id, "reservations": result}
+
+
+def _expire_old_reservations(session):
+    """Auto-expire old pending reservations and revert inventory"""
+    import json
+    from sqlmodel import select
+    from database.models import MedicineReservation, ReservationStatus, Inventory
+    
+    expired = session.exec(
+        select(MedicineReservation).where(
+            MedicineReservation.status == ReservationStatus.PENDING,
+            MedicineReservation.expires_at < datetime.utcnow()
+        )
+    ).all()
+    
+    for reservation in expired:
+        _revert_reservation_inventory(session, reservation)
+        reservation.status = ReservationStatus.EXPIRED
+        reservation.updated_at = datetime.utcnow()
+        session.add(reservation)
+    
+    if expired:
+        session.commit()
+
+
+def _revert_reservation_inventory(session, reservation):
+    """Restore inventory for a cancelled/expired reservation"""
+    import json
+    from sqlmodel import select
+    from database.models import Inventory
+    
+    medicines = json.loads(reservation.medicines_json)
+    for med in medicines:
+        inventory_item = session.exec(
+            select(Inventory).where(
+                Inventory.pharmacy_id == reservation.pharmacy_id,
+                Inventory.medicine_name == med["name"]
+            )
+        ).first()
+        
+        if inventory_item:
+            inventory_item.stock_count += med["quantity"]
+            session.add(inventory_item)

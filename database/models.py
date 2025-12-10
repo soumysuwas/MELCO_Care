@@ -284,3 +284,27 @@ class PrescriptionRecord(SQLModel, table=True):
     validation_notes: Optional[str] = Field(default=None)
     prescription_date: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ReservationStatus(str, Enum):
+    """Status of medicine reservation"""
+    PENDING = "pending"          # Reserved, waiting for pickup
+    PICKED_UP = "picked_up"      # User has collected medicines
+    CANCELLED = "cancelled"      # User cancelled
+    EXPIRED = "expired"          # Auto-cancelled after timeout
+
+
+class MedicineReservation(SQLModel, table=True):
+    """Medicine reservation for pickup"""
+    __tablename__ = "medicine_reservations"
+    
+    reservation_id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.user_id", index=True)
+    pharmacy_id: int = Field(foreign_key="pharmacies.pharmacy_id", index=True)
+    medicines_json: str  # JSON: [{"name": "Dolo 650", "quantity": 2, "price": 32.0}]
+    total_amount: float = Field(ge=0)
+    status: ReservationStatus = Field(default=ReservationStatus.PENDING)
+    expires_at: datetime  # 1 hour from creation
+    pickup_code: str = Field(max_length=10)  # 6-digit code for verification
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

@@ -129,6 +129,8 @@ def init_session_state():
         st.session_state.pharmacy_results = None
     if "prescription_data" not in st.session_state:
         st.session_state.prescription_data = None
+    if "show_reservations" not in st.session_state:
+        st.session_state.show_reservations = False
 
 
 # ============== API FUNCTIONS ==============
@@ -262,6 +264,51 @@ def api_list_pharmacies():
         return {"pharmacies": []}
 
 
+def api_reserve_medicine(user_id: int, pharmacy_id: int, medicines: list):
+    """Reserve medicines for pickup"""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/pharmacy/reserve",
+            json={
+                "user_id": user_id,
+                "pharmacy_id": pharmacy_id,
+                "medicines": medicines
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "message": str(e)}
+
+
+def api_get_reservations(user_id: int):
+    """Get user's reservations"""
+    try:
+        response = requests.get(
+            f"{API_BASE_URL}/pharmacy/reservations/{user_id}",
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except:
+        return {"reservations": []}
+
+
+def api_cancel_reservation(reservation_id: int, user_id: int):
+    """Cancel a reservation"""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/pharmacy/cancel/{reservation_id}",
+            params={"user_id": user_id},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "message": str(e)}
+
+
 # ============== UI COMPONENTS ==============
 
 def render_login_page():
@@ -361,6 +408,12 @@ def render_doctor_cards(doctors: list):
 
 def render_chat_interface():
     """Render the main chat interface"""
+    
+    # Show reservations page if requested
+    if st.session_state.get("show_reservations"):
+        render_reservations()
+        return
+    
     st.markdown("### 💬 Chat with MELCO-Care")
     
     # Display chat history
@@ -558,16 +611,107 @@ def render_pharmacy_results(results: dict):
             with col2:
                 st.metric("Distance", f"{pharmacy['distance_km']} km")
             
-            # Medicine availability
+            # Medicine availability with quantity
             st.markdown("**Medicines:**")
+            in_stock_meds = []
             for med in pharmacy['medicines']:
                 if med['in_stock']:
                     st.markdown(f"✅ **{med['name']}** - ₹{med['price']} (Stock: {med['stock']})")
+                    in_stock_meds.append(med)
                 else:
                     st.markdown(f"❌ ~~{med['name']}~~ - Out of Stock")
+            
+            # Reserve button for pharmacies with available medicines
+            if in_stock_meds:
+                st.markdown("---")
+                st.markdown("**🛒 Reserve for Pickup:**")
+                
+                # Build medicines list for reservation
+                meds_to_reserve = []
+                for med in in_stock_meds:
+                    qty = st.number_input(
+                        f"{med['name']} qty",
+                        min_value=1,
+                        max_value=min(5, med['stock']),
+                        value=1,
+                        key=f"qty_{pharmacy['pharmacy_id']}_{med['name']}"
+                    )
+                    meds_to_reserve.append({"name": med['name'], "quantity": qty})
+                
+                if st.button("📦 Reserve Now", key=f"reserve_{pharmacy['pharmacy_id']}", type="primary"):
+                    result = api_reserve_medicine(
+                        st.session_state.user_id,
+                        pharmacy['pharmacy_id'],
+                        meds_to_reserve
+                    )
+                    if result.get("success"):
+                        st.success(f"""
+                        ✅ **Reserved!**
+                        - Pickup Code: **{result['pickup_code']}**
+                        - Total: ₹{result['total_amount']}
+                        - Expires: {result['expires_at'][:16].replace('T', ' ')}
+                        - Show this code at {result['pharmacy_name']} within 1 hour!
+                        """)
+                        st.session_state.pharmacy_results = None
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {result.get('message', 'Reservation failed')}")
     
-    if st.button("🔄 Clear Results", key="clear_pharmacy"):
-        st.session_state.pharmacy_results = None
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Clear Results", key="clear_pharmacy"):
+            st.session_state.pharmacy_results = None
+            st.rerun()
+    with col2:
+        if st.button("📋 My Reservations", key="view_reservations"):
+            st.session_state.show_reservations = True
+            st.rerun()
+
+
+def render_reservations():
+    """Show user's reservations"""
+    st.markdown("### 📋 My Reservations")
+    
+    reservations = api_get_reservations(st.session_state.user_id)
+    res_list = reservations.get("reservations", [])
+    
+    if not res_list:
+        st.info("No reservations yet.")
+        if st.button("← Back"):
+            st.session_state.show_reservations = False
+            st.rerun()
+        return
+    
+    for res in res_list:
+        status_emoji = {
+            "pending": "⏳",
+            "picked_up": "✅",
+            "cancelled": "❌",
+            "expired": "⌛"
+        }.get(res['status'], "❓")
+        
+        with st.expander(f"{status_emoji} {res['pharmacy_name']} - ₹{res['total_amount']}", expanded=(res['status'] == 'pending')):
+            st.markdown(f"**Status:** {res['status'].upper()}")
+            
+            if res['status'] == 'pending':
+                st.markdown(f"**🔑 Pickup Code: `{res['pickup_code']}`**")
+                st.caption(f"⏰ Expires: {res['expires_at'][:16].replace('T', ' ')}")
+            
+            st.markdown("**Medicines:**")
+            for med in res['medicines']:
+                st.write(f"- {med['name']} x{med['quantity']} = ₹{med['total']}")
+            
+            if res['status'] == 'pending':
+                if st.button("❌ Cancel", key=f"cancel_{res['reservation_id']}"):
+                    result = api_cancel_reservation(res['reservation_id'], st.session_state.user_id)
+                    if result.get("success"):
+                        st.success("Cancelled!")
+                        st.rerun()
+                    else:
+                        st.error(result.get("message", "Failed"))
+    
+    if st.button("← Back to Chat"):
+        st.session_state.show_reservations = False
         st.rerun()
 
 
