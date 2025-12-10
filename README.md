@@ -296,18 +296,6 @@ python scripts/init_db.py
 
 ---
 
-## 👥 Contributors
-
-- **Nikhil Suwas** - Developer
-
----
-
-## 📄 License
-
-MIT License - Built for Google Solution Challenge / Healthcare Hackathon
-
----
-
 ## 🙏 Acknowledgments
 
 - **Ollama** for local LLM serving
