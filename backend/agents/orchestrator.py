@@ -10,6 +10,7 @@ from backend.services.vlm_service import get_vlm_service
 from backend.services.database_service import get_database_service
 from backend.agents.rag_builder import get_rag_builder
 from backend.agents.appointment import get_appointment_agent
+from backend.agents.pharmacy import get_pharmacy_agent
 
 
 class Intent(str, Enum):
@@ -18,6 +19,7 @@ class Intent(str, Enum):
     EMERGENCY = "emergency"
     SYMPTOM_CHECK = "symptom_check"
     HOSPITAL_INFO = "hospital_info"
+    PHARMACY = "pharmacy"
     GENERAL = "general"
 
 
@@ -85,6 +87,13 @@ class OrchestratorAgent:
         
         elif intent == Intent.HOSPITAL_INFO:
             action_result = self._handle_hospital_info(user.city)
+        
+        elif intent == Intent.PHARMACY:
+            action_result = self._handle_pharmacy_flow(
+                user_id=user_id,
+                message=message,
+                intent_result=intent_result
+            )
         
         else:
             action_result = {"action": "general_query"}
@@ -181,6 +190,53 @@ class OrchestratorAgent:
             "total": hospital_context.get("total_hospitals", 0)
         }
     
+    def _handle_pharmacy_flow(
+        self,
+        user_id: int,
+        message: str,
+        intent_result: Dict
+    ) -> Dict[str, Any]:
+        """Handle pharmacy-related queries"""
+        pharmacy_agent = get_pharmacy_agent()
+        
+        # Extract medicine names from the message
+        # The VLM should have extracted symptoms, we use those to suggest medicines
+        # Or user might directly ask for specific medicines
+        
+        # For now, extract potential medicine-related keywords
+        common_medicines = [
+            "paracetamol", "dolo", "crocin", "combiflam", "azithromycin",
+            "amoxicillin", "cetirizine", "pantoprazole", "omeprazole",
+            "metformin", "aspirin", "vitamin", "becosules"
+        ]
+        
+        # Check if user mentions specific medicines
+        mentioned_medicines = []
+        message_lower = message.lower()
+        for med in common_medicines:
+            if med in message_lower:
+                mentioned_medicines.append(med)
+        
+        if not mentioned_medicines:
+            # If no specific medicines, provide general pharmacy info
+            return {
+                "action": "pharmacy_info",
+                "message": "Please upload your prescription or tell me which medicines you need. I can help you find nearby pharmacies with availability.",
+                "needs_prescription": True
+            }
+        
+        # Search for medicines
+        recommendations = pharmacy_agent.get_pharmacy_recommendations(
+            medicines=mentioned_medicines,
+            user_id=user_id
+        )
+        
+        return {
+            "action": "pharmacy_search",
+            "medicines_searched": mentioned_medicines,
+            "recommendations": recommendations
+        }
+    
     def _format_action_context(self, action_result: Dict) -> str:
         """Format action result as context for LLM"""
         action = action_result.get("action", "")
@@ -211,6 +267,12 @@ class OrchestratorAgent:
             for h in hospitals[:5]:
                 context += f"- {h['name']} ({h['locality']}): {h['available_beds']} beds available\n"
             return context
+        
+        elif action == "pharmacy_search":
+            return action_result.get("recommendations", "No pharmacy information available.")
+        
+        elif action == "pharmacy_info":
+            return action_result.get("message", "Please provide prescription or medicine details.")
         
         return ""
 

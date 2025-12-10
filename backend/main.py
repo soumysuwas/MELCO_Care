@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from backend.config import settings
-from backend.routers import chat, admin
+from backend.routers import chat, admin, pharmacy
 
 
 @asynccontextmanager
@@ -43,6 +43,7 @@ app.add_middleware(
 # Include routers
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+app.include_router(pharmacy.router, prefix="/api", tags=["Pharmacy"])
 
 
 @app.get("/")

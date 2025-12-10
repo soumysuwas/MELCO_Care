@@ -99,7 +99,8 @@ Possible intents:
 2. "emergency" - User describes a medical emergency
 3. "symptom_check" - User is describing symptoms for advice
 4. "hospital_info" - User wants hospital/doctor information
-5. "general" - General query or greeting
+5. "pharmacy" - User wants to find medicines or validate prescription
+6. "general" - General query or greeting
 
 Respond ONLY with valid JSON in this exact format:
 {

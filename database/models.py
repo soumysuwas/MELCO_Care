@@ -197,3 +197,90 @@ class ChatMessage(SQLModel, table=True):
     content: str
     image_path: Optional[str] = Field(default=None, max_length=300)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============== PHARMACY MODELS ==============
+
+class MedicineCategory(str, Enum):
+    """Categories of medicines"""
+    PAINKILLER = "Painkiller"
+    ANTIBIOTIC = "Antibiotic"
+    ANTIHISTAMINE = "Antihistamine"
+    ANTACID = "Antacid"
+    DIABETES = "Diabetes"
+    CARDIAC = "Cardiac"
+    VITAMIN = "Vitamin"
+    ANTISEPTIC = "Antiseptic"
+    COUGH_COLD = "Cough & Cold"
+    ANTIFUNGAL = "Antifungal"
+    OTHER = "Other"
+
+
+class Pharmacy(SQLModel, table=True):
+    """Pharmacy locations - hospital-attached or standalone"""
+    __tablename__ = "pharmacies"
+    
+    pharmacy_id: Optional[int] = Field(default=None, primary_key=True)
+    hospital_id: Optional[int] = Field(default=None, foreign_key="hospitals.hospital_id")  # NULL if standalone
+    name: str = Field(max_length=200)
+    address: str = Field(max_length=300)
+    locality: str = Field(max_length=100)
+    city: str = Field(max_length=50, default="Hyderabad", index=True)
+    latitude: float
+    longitude: float
+    operating_hours: str = Field(default="9:00 AM - 9:00 PM")
+    license_number: str = Field(max_length=50)
+    is_24hr: bool = Field(default=False)
+    phone: Optional[str] = Field(default=None, max_length=15)
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    inventory: List["Inventory"] = Relationship(back_populates="pharmacy")
+
+
+class Inventory(SQLModel, table=True):
+    """Medicine inventory at each pharmacy"""
+    __tablename__ = "inventory"
+    
+    inventory_id: Optional[int] = Field(default=None, primary_key=True)
+    pharmacy_id: int = Field(foreign_key="pharmacies.pharmacy_id", index=True)
+    medicine_name: str = Field(max_length=200, index=True)  # Brand name (e.g., "Dolo 650")
+    salt_composition: str = Field(max_length=200)  # Generic (e.g., "Paracetamol 650mg")
+    manufacturer: str = Field(max_length=100)
+    category: MedicineCategory = Field(default=MedicineCategory.OTHER)
+    stock_count: int = Field(ge=0, default=0)
+    price_inr: float = Field(ge=0)
+    requires_prescription: bool = Field(default=True)
+    last_restocked: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Relationships
+    pharmacy: Optional[Pharmacy] = Relationship(back_populates="inventory")
+
+
+class DoctorSignature(SQLModel, table=True):
+    """Doctor registration for prescription verification"""
+    __tablename__ = "doctor_signatures"
+    
+    signature_id: Optional[int] = Field(default=None, primary_key=True)
+    doctor_id: int = Field(foreign_key="doctors.doctor_id", unique=True)
+    medical_reg_number: str = Field(max_length=50, unique=True, index=True)  # e.g., "TS-12345"
+    council_name: str = Field(max_length=100, default="Telangana Medical Council")
+    signature_hash: Optional[str] = Field(default=None, max_length=200)  # For future digital verification
+    is_verified: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PrescriptionRecord(SQLModel, table=True):
+    """Record of validated prescriptions"""
+    __tablename__ = "prescription_records"
+    
+    prescription_id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.user_id", index=True)
+    doctor_reg_number: str = Field(max_length=50)
+    image_path: str = Field(max_length=300)
+    extracted_medicines: str  # JSON string of extracted medicines
+    is_valid: bool = Field(default=False)
+    validation_notes: Optional[str] = Field(default=None)
+    prescription_date: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
