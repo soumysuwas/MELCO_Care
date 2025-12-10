@@ -1,0 +1,31 @@
+# MELCO-Care Dependencies
+
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+
+# Frontend
+streamlit==1.41.1
+
+# Database
+sqlmodel==0.0.22
+aiosqlite==0.20.0
+
+# AI/ML - Orchestration
+langgraph==0.2.60
+langchain==0.3.12
+langchain-ollama==0.2.2
+
+# Utilities
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+httpx==0.28.1
+Pillow==11.0.0
+
+# Data Generation
+faker==33.1.0
+
+# HTTP Client for Ollama
+requests==2.32.3
